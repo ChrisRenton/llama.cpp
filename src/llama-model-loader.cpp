@@ -471,7 +471,7 @@ llama_model_loader::llama_model_loader(
         bool use_mmap,
         bool check_tensors,
         const llama_model_kv_override * param_overrides_p,
-        const llama_model_tensor_buft_override * param_tensor_buft_overrides_p) {
+        const llama_model_tensor_buft_override * param_tensor_buft_overrides_p) : use_mmap(use_mmap), check_tensors(check_tensors), tensor_buft_overrides(param_tensor_buft_overrides_p) {
     int trace = 0;
     if (getenv("LLAMA_TRACE")) {
         trace = atoi(getenv("LLAMA_TRACE"));
@@ -482,8 +482,6 @@ llama_model_loader::llama_model_loader(
             kv_overrides.insert({std::string(p->key), *p});
         }
     }
-
-    tensor_buft_overrides = param_tensor_buft_overrides_p;
 
     // Load the main GGUF
     struct ggml_context * ctx = NULL;
@@ -1022,6 +1020,13 @@ bool llama_model_loader::load_all_data(
             continue;
         }
 
+        // Skip tensor if it matches the skip pattern
+        if (should_skip_tensor(ggml_get_name(cur))) {
+            LLAMA_LOG_INFO("%s: skipping tensor '%s' due to regex pattern\n", __func__, ggml_get_name(cur));
+            size_done += ggml_nbytes(cur);
+            continue;
+        }
+
         if (progress_callback) {
             if (!progress_callback((float) size_done / size_data, progress_callback_user_data)) {
                 return false;
@@ -1146,6 +1151,35 @@ bool llama_model_loader::load_all_data(
     }
 
     return true;
+}
+
+bool llama_model_loader::should_skip_tensor(const std::string & tensor_name) const {
+    if (!skip_blocks_enabled) {
+        return false;
+    }
+    try {
+        return std::regex_match(tensor_name, skip_blocks_regex);
+    } catch (const std::regex_error& e) {
+        LLAMA_LOG_WARN("%s: regex error when matching tensor '%s': %s\n", __func__, tensor_name.c_str(), e.what());
+        return false;
+    }
+}
+
+void llama_model_loader::set_skip_blocks_pattern(const std::string & pattern) {
+    if (pattern.empty()) {
+        skip_blocks_enabled = false;
+        return;
+    }
+    
+    try {
+        skip_blocks_pattern = pattern;
+        skip_blocks_regex = std::regex(pattern);
+        skip_blocks_enabled = true;
+        LLAMA_LOG_INFO("%s: skip blocks pattern set to '%s'\n", __func__, pattern.c_str());
+    } catch (const std::regex_error& e) {
+        LLAMA_LOG_ERROR("%s: invalid regex pattern '%s': %s\n", __func__, pattern.c_str(), e.what());
+        skip_blocks_enabled = false;
+    }
 }
 
 std::string llama_model_loader::ftype_name() const {

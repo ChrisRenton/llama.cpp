@@ -10,6 +10,7 @@
 
 #include <cstddef>
 #include <map>
+#include <regex>
 #include <stdexcept>
 #include <unordered_map>
 
@@ -86,6 +87,17 @@ struct llama_model_loader {
 
     std::string arch_name;
     LLM_KV      llm_kv    = LLM_KV(LLM_ARCH_UNKNOWN);
+
+    // MoE block skipping
+    std::string skip_blocks_pattern;
+    std::regex skip_blocks_regex;
+    bool skip_blocks_enabled = false;
+
+    // Helper function to check if a tensor should be skipped
+    bool should_skip_tensor(const std::string & tensor_name) const;
+
+    // Function to set the skip blocks pattern
+    void set_skip_blocks_pattern(const std::string & pattern);
 
     size_t size_done = 0;
     size_t size_data = 0;

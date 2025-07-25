@@ -3298,6 +3298,14 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_examples({LLAMA_EXAMPLE_TTS}));
 
+    add_opt(common_arg(
+        {"--skip-blocks"}, "PATTERN",
+        "regex pattern to skip specific MoE blocks during loading (e.g., \"blk.12.ffn_expert_3\")",
+        [](common_params & params, const std::string & value) {
+            params.skip_blocks = value;
+        }
+    ).set_examples({LLAMA_EXAMPLE_MAIN, LLAMA_EXAMPLE_SERVER}));
+
     // model-specific
     add_opt(common_arg(
         {"--tts-oute-default"},
