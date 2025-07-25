@@ -1157,17 +1157,13 @@ bool llama_model_loader::should_skip_tensor(const std::string & tensor_name) con
     if (!skip_blocks_enabled) {
         return false;
     }
-    try {
-        return std::regex_match(tensor_name, skip_blocks_regex);
-    } catch (const std::regex_error& e) {
-        LLAMA_LOG_WARN("%s: regex error when matching tensor '%s': %s\n", __func__, tensor_name.c_str(), e.what());
-        return false;
-    }
+    return skip_blocks_set.find(tensor_name) != skip_blocks_set.end();
 }
 
 void llama_model_loader::set_skip_blocks_pattern(const std::string & pattern) {
     if (pattern.empty()) {
         skip_blocks_enabled = false;
+        skip_blocks_set.clear();
         return;
     }
     
@@ -1175,10 +1171,22 @@ void llama_model_loader::set_skip_blocks_pattern(const std::string & pattern) {
         skip_blocks_pattern = pattern;
         skip_blocks_regex = std::regex(pattern);
         skip_blocks_enabled = true;
-        LLAMA_LOG_INFO("%s: skip blocks pattern set to '%s'\n", __func__, pattern.c_str());
+        
+        // Precompute the set of matching tensors
+        skip_blocks_set.clear();
+        for (const auto& kv : weights_map) {
+            const std::string& tensor_name = kv.first;
+            if (std::regex_match(tensor_name, skip_blocks_regex)) {
+                skip_blocks_set.insert(tensor_name);
+            }
+        }
+        
+        LLAMA_LOG_INFO("%s: skip blocks pattern set to '%s', matched %zu tensors\n", 
+                      __func__, pattern.c_str(), skip_blocks_set.size());
     } catch (const std::regex_error& e) {
         LLAMA_LOG_ERROR("%s: invalid regex pattern '%s': %s\n", __func__, pattern.c_str(), e.what());
         skip_blocks_enabled = false;
+        skip_blocks_set.clear();
     }
 }
 

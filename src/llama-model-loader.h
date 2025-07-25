@@ -13,6 +13,7 @@
 #include <regex>
 #include <stdexcept>
 #include <unordered_map>
+#include <unordered_set>
 
 using llama_buf_map = std::unordered_map<uint32_t, ggml_backend_buffer_t>;
 
@@ -92,6 +93,7 @@ struct llama_model_loader {
     std::string skip_blocks_pattern;
     std::regex skip_blocks_regex;
     bool skip_blocks_enabled = false;
+    std::unordered_set<std::string> skip_blocks_set;
 
     // Helper function to check if a tensor should be skipped
     bool should_skip_tensor(const std::string & tensor_name) const;
