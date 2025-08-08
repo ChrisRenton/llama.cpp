@@ -920,6 +920,11 @@ extern "C" {
             struct llama_context * ctx,
               struct llama_batch   batch);
 
+    // Flush per-prompt MoE routing summary (JSON line) and reset accumulators.
+    // Controlled by env vars (default off):
+    //   LLAMA_MOE_LOG=1 to enable, LLAMA_MOE_LOG_FILE=path (default: moe-log.jsonl)
+    LLAMA_API void llama_moe_log_flush(struct llama_context * ctx, const char * session_id, const char * prompt_id);
+
     // Set the number of threads used for decoding
     // n_threads is the number of threads used for generation (single token)
     // n_threads_batch is the number of threads used for prompt and batch processing (multiple tokens)

@@ -11,6 +11,8 @@
 #include <cstring>
 #include <limits>
 #include <stdexcept>
+#include <fstream>
+#include <sstream>
 
 //
 // llama_context
@@ -102,6 +104,15 @@ llama_context::llama_context(
 
     cparams.op_offload = params.op_offload;
     cparams.kv_unified = params.kv_unified;
+
+    // MoE logging env controls (default off)
+    {
+        const char * env_log = getenv("LLAMA_MOE_LOG");
+        moe_log_enabled = env_log && atoi(env_log) != 0;
+        if (const char * env_file = getenv("LLAMA_MOE_LOG_FILE")) {
+            if (*env_file) moe_log_file = env_file;
+        }
+    }
 
     {
         const char * LLAMA_SET_ROWS = getenv("LLAMA_SET_ROWS");
@@ -761,6 +772,11 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
         return nullptr;
     }
 
+    // Accumulate MoE stats per token/layer if enabled
+    if (moe_log_enabled) {
+        moe_log_accumulate(res->get_gf(), ubatch);
+    }
+
     ret = GGML_STATUS_SUCCESS;
 
     return res;
@@ -1230,6 +1246,130 @@ int llama_context::decode(const llama_batch & batch_inp) {
     //synchronize();
 
     return 0;
+}
+
+// --- MoE logging implementation ---
+void llama_context::moe_log_accumulate(ggml_cgraph * gf, const llama_ubatch & ubatch) {
+    const auto & hparams = model.hparams;
+    const uint32_t n_layer = hparams.n_layer;
+    const uint32_t n_expert = hparams.n_expert;
+    const uint32_t n_expert_used = hparams.n_expert_used;
+    if (n_expert == 0 || n_expert_used == 0) return;
+
+    if (moe_stats.empty()) {
+        moe_stats.resize(n_layer);
+        for (uint32_t il = 0; il < n_layer; ++il) {
+            moe_stats[il].selection_count.assign(n_expert, 0);
+            moe_stats[il].weight_sum.assign(n_expert, 0.0);
+            moe_stats[il].total_tokens = 0;
+        }
+    }
+
+    // for each layer, pull tensors if present
+    char name_topk[64];
+    char name_wnorm[64];
+    char name_wscaled[64];
+    char name_wraw[64];
+
+    for (uint32_t il = 0; il < n_layer; ++il) {
+        snprintf(name_topk, sizeof(name_topk), "ffn_moe_topk-%u", il);
+        snprintf(name_wnorm, sizeof(name_wnorm), "ffn_moe_weights_norm-%u", il);
+        snprintf(name_wscaled, sizeof(name_wscaled), "ffn_moe_weights_scaled-%u", il);
+        snprintf(name_wraw, sizeof(name_wraw), "ffn_moe_weights-%u", il);
+
+        ggml_tensor * t_ids = ggml_graph_get_tensor(gf, name_topk);
+        if (!t_ids) continue; // layer is not MoE or not used
+
+        ggml_tensor * t_w = ggml_graph_get_tensor(gf, name_wnorm);
+        if (!t_w) t_w = ggml_graph_get_tensor(gf, name_wscaled);
+        if (!t_w) t_w = ggml_graph_get_tensor(gf, name_wraw);
+        if (!t_w) continue;
+
+        // shapes: ids: [k, n_tokens], weights may be [1,k,n_tokens] or [k,n_tokens]
+        const int64_t k = t_ids->ne[0];
+        const int64_t n_tokens = t_ids->ne[1];
+        if (k <= 0 || n_tokens <= 0) continue;
+
+        std::vector<int32_t> ids(k * n_tokens);
+        ggml_backend_tensor_get(t_ids, ids.data(), 0, ids.size() * sizeof(int32_t));
+
+        // normalize weights view to [k, n_tokens]
+        std::vector<float> w(k * n_tokens);
+        if (t_w->ne[0] == 1 && t_w->ne[1] == k && t_w->ne[2] == n_tokens) {
+            // [1, k, n_tokens]
+            ggml_backend_tensor_get(t_w, w.data(), 0, w.size() * sizeof(float));
+        } else if (t_w->ne[0] == k && t_w->ne[1] == n_tokens) {
+            ggml_backend_tensor_get(t_w, w.data(), 0, w.size() * sizeof(float));
+        } else {
+            // unexpected shape, skip
+            continue;
+        }
+
+        // accumulate over all tokens in this ubatch
+        auto & layer_stats = moe_stats[il];
+        layer_stats.total_tokens += (uint64_t) n_tokens;
+
+        for (int64_t t = 0; t < n_tokens; ++t) {
+            for (int64_t j = 0; j < k; ++j) {
+                const int64_t idx = j + t * k;
+                const int32_t expert = ids[idx];
+                if (expert < 0 || (uint32_t)expert >= n_expert) continue;
+                const double weight = (double) w[idx];
+                layer_stats.selection_count[expert]++;
+                layer_stats.weight_sum[expert] += weight;
+            }
+        }
+    }
+}
+
+void llama_context::moe_log_flush_impl(const char * session_id, const char * prompt_id) {
+    if (!moe_log_enabled || moe_stats.empty()) return;
+
+    // Build JSON line
+    std::ostringstream os;
+    os << '{';
+    bool wrote = false;
+    if (session_id && *session_id) {
+        os << "\"session_id\":\"" << session_id << "\"";
+        wrote = true;
+    }
+    if (prompt_id && *prompt_id) {
+        if (wrote) os << ',';
+        os << "\"prompt_id\":\"" << prompt_id << "\"";
+        wrote = true;
+    }
+    if (wrote) os << ',';
+    os << "\"per_layer\":[";
+    for (size_t il = 0; il < moe_stats.size(); ++il) {
+        const auto & s = moe_stats[il];
+        if (il) os << ',';
+        os << '{';
+        os << "\"layer\":" << il << ",";
+        os << "\"total_tokens\":" << s.total_tokens << ",";
+        os << "\"selection_count\":[";
+        for (size_t e = 0; e < s.selection_count.size(); ++e) {
+            if (e) os << ',';
+            os << s.selection_count[e];
+        }
+        os << "],\"weight_sum\":[";
+        for (size_t e = 0; e < s.weight_sum.size(); ++e) {
+            if (e) os << ',';
+            os << s.weight_sum[e];
+        }
+        os << "]}";
+    }
+    os << "]}";
+
+    // Append to file
+    try {
+        std::ofstream f(moe_log_file, std::ios::app);
+        f << os.str() << '\n';
+    } catch (...) {
+        // ignore file errors in core
+    }
+
+    // reset
+    moe_stats.clear();
 }
 
 //
@@ -2839,6 +2979,12 @@ int32_t llama_decode(
     }
 
     return ret;
+}
+
+void llama_moe_log_flush(llama_context * ctx, const char * session_id, const char * prompt_id) {
+    if (!ctx) return;
+    ctx->synchronize();
+    ctx->moe_log_flush_impl(session_id, prompt_id);
 }
 
 //

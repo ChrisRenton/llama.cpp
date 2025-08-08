@@ -10,6 +10,7 @@
 
 #include <map>
 #include <vector>
+#include <string>
 
 struct llama_model;
 class llama_batch_allocr;
@@ -300,4 +301,22 @@ private:
     mutable int32_t n_eval   = 0; // number of eval calls
 
     mutable int32_t n_reused = 0; // number of times the previous graph was reused
+
+    // --- MoE logging (per-prompt aggregation) ---
+    struct moe_layer_stats {
+        std::vector<uint64_t> selection_count; // size: n_expert
+        std::vector<double>   weight_sum;      // size: n_expert
+        uint64_t total_tokens = 0;
+    };
+
+    bool   moe_log_enabled = false;
+    std::string moe_log_file = "moe-log.jsonl";
+    // per-layer stats sized lazily when first used
+    std::vector<moe_layer_stats> moe_stats; // size: hparams.n_layer (when active)
+
+    void moe_log_accumulate(ggml_cgraph * gf, const llama_ubatch & ubatch);
+    void moe_log_flush_impl(const char * session_id, const char * prompt_id);
+
+    // allow C API wrapper to call the private flush implementation
+    friend void llama_moe_log_flush(struct llama_context * ctx, const char * session_id, const char * prompt_id);
 };
