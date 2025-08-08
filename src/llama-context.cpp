@@ -1325,7 +1325,30 @@ void llama_context::moe_log_accumulate(ggml_cgraph * gf, const llama_ubatch & ub
 void llama_context::moe_log_flush_impl(const char * session_id, const char * prompt_id) {
     if (!moe_log_enabled || moe_stats.empty()) return;
 
-    // Build JSON line
+    // Aggregate totals across layers for this prompt
+    size_t n_expert = 0;
+    uint64_t total_tokens = 0;
+    uint32_t layers_seen = 0;
+    for (const auto & s : moe_stats) {
+        if (!s.selection_count.empty() || !s.weight_sum.empty()) {
+            n_expert = std::max(n_expert, std::max(s.selection_count.size(), s.weight_sum.size()));
+            layers_seen += 1;
+        }
+        total_tokens += s.total_tokens;
+    }
+
+    std::vector<uint64_t> agg_selection_count(n_expert, 0);
+    std::vector<double>   agg_weight_sum(n_expert, 0.0);
+    for (const auto & s : moe_stats) {
+        for (size_t e = 0; e < s.selection_count.size(); ++e) {
+            agg_selection_count[e] += s.selection_count[e];
+        }
+        for (size_t e = 0; e < s.weight_sum.size(); ++e) {
+            agg_weight_sum[e] += s.weight_sum[e];
+        }
+    }
+
+    // Build compact per-prompt JSON line
     std::ostringstream os;
     os << '{';
     bool wrote = false;
@@ -1339,24 +1362,17 @@ void llama_context::moe_log_flush_impl(const char * session_id, const char * pro
         wrote = true;
     }
     if (wrote) os << ',';
-    os << "\"per_layer\":[";
-    for (size_t il = 0; il < moe_stats.size(); ++il) {
-        const auto & s = moe_stats[il];
-        if (il) os << ',';
-        os << '{';
-        os << "\"layer\":" << il << ",";
-        os << "\"total_tokens\":" << s.total_tokens << ",";
-        os << "\"selection_count\":[";
-        for (size_t e = 0; e < s.selection_count.size(); ++e) {
-            if (e) os << ',';
-            os << s.selection_count[e];
-        }
-        os << "],\"weight_sum\":[";
-        for (size_t e = 0; e < s.weight_sum.size(); ++e) {
-            if (e) os << ',';
-            os << s.weight_sum[e];
-        }
-        os << "]}";
+    os << "\"layers_seen\":" << layers_seen << ",";
+    os << "\"total_tokens\":" << total_tokens << ",";
+    os << "\"selection_count\":[";
+    for (size_t e = 0; e < agg_selection_count.size(); ++e) {
+        if (e) os << ',';
+        os << agg_selection_count[e];
+    }
+    os << "],\"weight_sum\":[";
+    for (size_t e = 0; e < agg_weight_sum.size(); ++e) {
+        if (e) os << ',';
+        os << agg_weight_sum[e];
     }
     os << "]}";
 
